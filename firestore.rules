@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Only these two Google accounts can read or write anything.
+    // Use lowercase, and keep this list the same as householdEmails in firebase-config.js.
+    function household() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower() in [
+          'filipefa1998@gmail.com',
+          'wife.email@gmail.com'
+        ];
+    }
+
+    // Private fun money: only the person who owns it can see it.
+    match /data/users/{uid}/{doc=**} {
+      allow read, write: if household() && request.auth.uid == uid;
+    }
+
+    // Everything else is shared between the two of you.
+    match /{collection}/{doc} {
+      allow read, write: if household() && collection != 'data';
+    }
+  }
+}
