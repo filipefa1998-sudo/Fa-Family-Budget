@@ -42,9 +42,9 @@ body{margin:0;min-height:100vh}
 .wrap{max-width:780px;margin:0 auto;padding-inline:16px;padding-block:calc(14px + env(safe-area-inset-top,0px)) 110px}
 body.gated .tabs{display:none}
 #gate{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px}
-.gate-card{max-width:360px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:14px;background:var(--surface);border:1px solid var(--line);border-radius:24px;padding:28px 22px}
+.gate-card{width:100%;max-width:360px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:14px;background:var(--surface);border:1px solid var(--line);border-radius:24px;padding:28px 22px}
 .gate-card p{margin:0;color:var(--muted)} .gate-card b{color:var(--ink)} .gate-card code{font-size:13px;background:var(--glass);padding:1px 5px;border-radius:5px}
-#gateJar{width:240px;height:200px}
+#gateJar{width:180px;height:150px}
 h1,h2,h3{margin:0;text-wrap:balance}
 .eyebrow{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600}
 .muted{color:var(--muted)}
@@ -1054,23 +1054,75 @@ document.addEventListener("click", e => {
 /* ---------- sign-in gate ---------- */
 const CFG = window.FFB_CONFIG || {};
 const allowed = (CFG.householdEmails || []).map(e => e.toLowerCase().trim());
+let gateMode = "signin";
 function showGate(kind, extra) {
   document.body.classList.add("gated");
-  const msg = {
-    config: `<b>Firebase isn't set up yet.</b> Paste your project's config into <code>firebase-config.js</code> (see the README), then reload.`,
-    signin: `Sign in with the Google account you use for the household budget.`,
-    denied: `<b>${esc(extra || "This account")} isn't on the household list.</b> Sign in with one of the two household Google accounts.`,
-    error: `<b>Sign-in didn't finish.</b> ${esc(extra || "Try again.")}`
-  }[kind];
   $("#gate").hidden = false; $("#app").hidden = true;
+  if (kind === "config") {
+    $("#gate").innerHTML = `<div class="gate-card"><div class="brand" style="font-size:22px">Fa Family Budget</div><canvas id="gateJar" width="240" height="200" aria-hidden="true"></canvas>
+      <p><b>Firebase isn't set up yet.</b> The Firebase keys in index.html are missing.</p></div>`;
+    drawGateJar(); return;
+  }
+  if (kind === "denied") {
+    $("#gate").innerHTML = `<div class="gate-card"><div class="brand" style="font-size:22px">Fa Family Budget</div><canvas id="gateJar" width="240" height="200" aria-hidden="true"></canvas>
+      <p><b>${esc(extra || "This account")} isn't on the household list.</b></p>
+      <button class="btn gold" type="button" id="signOutBtn">Sign out</button></div>`;
+    $("#signOutBtn").onclick = () => firebase.auth().signOut();
+    drawGateJar(); return;
+  }
+  const up = gateMode === "signup";
   $("#gate").innerHTML = `<div class="gate-card"><div class="brand" style="font-size:22px">Fa Family Budget</div>
     <canvas id="gateJar" width="240" height="200" aria-hidden="true"></canvas>
-    <p>${msg}</p>
-    ${kind === "config" ? "" : `<button class="btn gold" type="button" id="signInBtn">Sign in with Google</button>`}
-    ${kind === "denied" ? `<button class="link" type="button" id="signOutBtn">Use a different account</button>` : ""}</div>`;
-  const b = $("#signInBtn"); if (b) b.onclick = signIn;
-  const o = $("#signOutBtn"); if (o) o.onclick = () => firebase.auth().signOut();
+    <form id="loginForm" novalidate style="width:100%;text-align:left">
+      <div class="field"><label for="li-email">Email</label><input id="li-email" type="email" autocomplete="username" inputmode="email" autocapitalize="off" spellcheck="false" value="${esc(gateShow.email || "")}"></div>
+      <div class="field"><label for="li-pass">Password</label><input id="li-pass" type="password" autocomplete="${up ? "new-password" : "current-password"}" ${up ? 'placeholder="At least 6 characters"' : ""}></div>
+      <p class="err" id="li-err" role="alert">${esc(extra || "")}</p>
+      <button class="btn gold" type="submit" id="li-go" style="width:100%">${up ? "Create account" : "Sign in"}</button>
+    </form>
+    <div class="row" style="gap:16px;flex-wrap:wrap;justify-content:center">
+      <button class="link" type="button" id="li-mode">${up ? "I already have an account" : "First time? Create your account"}</button>
+      ${up ? "" : `<button class="link" type="button" id="li-forgot">Forgot password</button>`}
+    </div></div>`;
+  $("#li-mode").onclick = () => { gateShow.email = $("#li-email").value; gateMode = up ? "signin" : "signup"; showGate("signin"); };
+  const fg = $("#li-forgot"); if (fg) fg.onclick = resetPassword;
+  $("#loginForm").onsubmit = e => { e.preventDefault(); submitLogin(); };
   drawGateJar();
+}
+const gateShow = { email: "" };
+function authMsg(e) {
+  return ({
+    "auth/invalid-credential": "That email and password don't match. Check them, or tap Forgot password.",
+    "auth/wrong-password": "That password isn't right. Try again, or tap Forgot password.",
+    "auth/user-not-found": "There's no account for that email yet. Tap “First time? Create your account”.",
+    "auth/invalid-email": "Enter a full email address.",
+    "auth/missing-password": "Enter your password.",
+    "auth/weak-password": "Use a password with at least 6 characters.",
+    "auth/email-already-in-use": "That email already has an account. Tap “I already have an account” and sign in.",
+    "auth/operation-not-allowed": "Email sign-in is turned off. In Firebase go to Authentication → Sign-in method → Email/Password and turn it on.",
+    "auth/too-many-requests": "Too many tries. Wait a few minutes, or reset your password.",
+    "auth/network-request-failed": "Couldn't reach the server. Check your connection and try again."
+  })[e && e.code] || ((e && e.message) || "Something went wrong. Try again.");
+}
+async function submitLogin() {
+  const email = $("#li-email").value.trim().toLowerCase(), pass = $("#li-pass").value, err = $("#li-err");
+  gateShow.email = email;
+  if (!email) { err.textContent = "Enter your email."; return; }
+  if (allowed.length && !allowed.includes(email)) { err.textContent = "That email isn't one of the two household accounts."; return; }
+  if (!pass) { err.textContent = "Enter your password."; return; }
+  const go = $("#li-go"); go.disabled = true; go.textContent = gateMode === "signup" ? "Creating…" : "Signing in…"; err.textContent = "";
+  try {
+    if (gateMode === "signup") await firebase.auth().createUserWithEmailAndPassword(email, pass);
+    else await firebase.auth().signInWithEmailAndPassword(email, pass);
+    gateMode = "signin";
+  } catch (e) {
+    err.textContent = authMsg(e); go.disabled = false; go.textContent = gateMode === "signup" ? "Create account" : "Sign in";
+  }
+}
+async function resetPassword() {
+  const email = $("#li-email").value.trim().toLowerCase(), err = $("#li-err");
+  if (!email) { err.textContent = "Type your email above first, then tap Forgot password."; return; }
+  try { await firebase.auth().sendPasswordResetEmail(email); err.style.color = "var(--ok)"; err.textContent = `Reset link sent to ${email}. Check your inbox (and spam).`; }
+  catch (e) { err.textContent = authMsg(e); }
 }
 function hideGate() { document.body.classList.remove("gated"); $("#gate").hidden = true; $("#app").hidden = false; }
 function drawGateJar() {
@@ -1082,17 +1134,6 @@ function drawGateJar() {
   ctx.fillStyle = cs.getPropertyValue("--gold"); [[95, 79], [140, 77]].forEach(([x, y]) => { ctx.beginPath(); ctx.ellipse(x, y, 6, 3.4, .3, 0, Math.PI * 2); ctx.fill(); });
   ctx.restore(); ctx.save(); jarPath(ctx, R); ctx.strokeStyle = cs.getPropertyValue("--line"); ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
 }
-async function signIn() {
-  const p = new firebase.auth.GoogleAuthProvider(); p.setCustomParameters({ prompt: "select_account" });
-  try {
-    const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
-    if (standalone) await firebase.auth().signInWithRedirect(p); else await firebase.auth().signInWithPopup(p);
-  } catch (e) {
-    if (e.code === "auth/popup-blocked" || e.code === "auth/operation-not-supported-in-this-environment") return firebase.auth().signInWithRedirect(p);
-    if (e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request") showGate("error", e.message);
-  }
-}
-
 /* ---------- boot ---------- */
 (function boot() {
   const cfg = CFG.firebase || {};
@@ -1100,7 +1141,6 @@ async function signIn() {
   firebase.initializeApp(cfg);
   store.db = firebase.firestore();
   store.db.enablePersistence({ synchronizeTabs: true }).catch(() => {});
-  firebase.auth().getRedirectResult().catch(e => showGate("error", e.message));
   window.addEventListener("online", schedule); window.addEventListener("offline", schedule);
   let started = false;
   firebase.auth().onAuthStateChanged(async user => {
