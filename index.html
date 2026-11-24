@@ -371,6 +371,17 @@ function earners() {
   return emails.map(email => { const m = S.members.find(x => (x.email || "").toLowerCase() === email); return { email, name: (m && m.name) || cfgName(email) || email.split("@")[0] }; });
 }
 
+/* ---------- money in: who got paid, and what kind ---------- */
+const PAY_KINDS = [["pay", "Paycheck", "💵"], ["overtime", "Overtime", "⏱️"], ["commission", "Commission / bonus", "💼"], ["side", "Side hustle", "🛠️"], ["other", "Other money", "🎁"]];
+const kindOf = k => PAY_KINDS.find(x => x[0] === k) || PAY_KINDS[0];
+const BOTH = "Both of us";
+function payLabel(who, kind) {
+  const word = { pay: "paycheck", overtime: "overtime", commission: "commission / bonus", side: "side hustle", other: "other money" }[kind] || "paycheck";
+  return who && who !== BOTH ? `${who}'s ${word}` : kindOf(kind)[1];
+}
+/* who was paid, for older entries too */
+const earnerOf = t => t.earner || (/^(.+)'s (paycheck|overtime|commission)/.exec(t.payee || "") || [])[1] || "";
+
 /* ---------- category icons ---------- */
 const ICONS = { groceries: "🛒", dining: "🍔", gas: "⛽", household: "🧺", kids: "🧒", family: "🎉", carmaint: "🔧", gifts: "🎁", annual: "📅",
   mortgage: "🏡", utilities: "💡", phone: "📱", insurance: "🛡️", car: "🚗", tithing: "⛪", fastoffering: "🙏" };
@@ -384,7 +395,8 @@ const catById = id => S.cats.find(c => c.id === id);
 const txnsIn = mk => S.txns.filter(t => t.date && mkey(t.date) === mk);
 const spentIn = (mk, catId) => txnsIn(mk).filter(t => t.type !== "income" && (catId === undefined || t.categoryId === catId)).reduce((a, t) => a + (t.amount || 0), 0);
 const incomeIn = mk => txnsIn(mk).filter(t => t.type === "income").reduce((a, t) => a + (t.amount || 0), 0);
-const plannedIncome = mk => Math.max(S.settings.expectedIncome || 0, incomeIn(mk));
+// Only money that has actually come in counts. (The "usual pay" setting is just for comparison.)
+const plannedIncome = mk => incomeIn(mk);
 
 function billDue(b, mk) {
   const start = b.startMonth || mk;
@@ -394,7 +406,11 @@ function billDue(b, mk) {
   if (b.freq === "yearly") return diff % 12 === 0;
   return true;
 }
-const billsIn = mk => S.bills.filter(b => billDue(b, mk)).map(b => ({ ...b, day: Math.min(b.dueDay || 1, dim(mk)), paid: !!(b.paid && b.paid[mk]) })).sort((a, b) => a.day - b.day);
+const billsIn = mk => S.bills.filter(b => billDue(b, mk)).map(b => {
+  const dueDate = (b.dueOn && b.dueOn[mk]) || `${mk}-${pad(Math.min(b.dueDay || 1, dim(mk)))}`;
+  const tid = b.paid && b.paid[mk], tx = tid ? S.txns.find(t => t.id === tid) : null;
+  return { ...b, dueDate, day: Number(dueDate.slice(8)), moved: !!(b.dueOn && b.dueOn[mk]), paid: !!tid, paidTxn: tx, paidDate: tx ? tx.date : null, paidAmt: tx ? tx.amount : (b.amount || 0) };
+}).sort((a, b) => a.day - b.day);
 const goalContribIn = (g, mk) => (g.log || []).filter(l => l.d && mkey(l.d) === mk).reduce((a, l) => a + l.amt, 0);
 const goalPlanRemaining = mk => S.goals.filter(g => !g.done).reduce((a, g) => a + Math.max(0, (g.monthly || 0) - goalContribIn(g, mk)), 0);
 const goalPlanTotal = () => S.goals.filter(g => !g.done).reduce((a, g) => a + (g.monthly || 0), 0);
@@ -453,7 +469,7 @@ function txnRow(t) {
   return `<button class="item" type="button" data-txn="${esc(t.id)}">
     <span style="font-size:24px;line-height:1;flex:none;width:30px;text-align:center" aria-hidden="true">${inc ? "💵" : iconOf(c)}</span>
     <span class="main"><span class="t">${esc(t.payee || (inc ? "Money in" : c ? c.name : "Spent"))}</span>
-    <span class="s">${dayLabel(t.date)} · ${esc(inc ? "Came in" : c ? c.name : "Needs a category")} · ${esc(nameOf(t.by))}</span></span>
+    <span class="s">${dayLabel(t.date)} · ${inc ? (earnerOf(t) ? "Paid to " + esc(earnerOf(t)) : "Came in") : esc(c ? c.name : "Needs a category")} · ${esc(nameOf(t.by))}</span></span>
     <span class="amt ${inc ? "pos" : ""}">${inc ? "+" : ""}${money(t.amount, true)}</span></button>`;
 }
 
@@ -466,11 +482,11 @@ function viewHome() {
   const upcoming = billsIn(mk).filter(b => !b.paid).slice(0, 5);
   const recent = [...S.txns].sort((a, b) => (b.date + (b.ts || 0)).localeCompare(a.date + (a.ts || 0))).slice(0, 8);
   const funLeft = (S.settings.allowance || 0) - S.fun.filter(f => f.date && mkey(f.date) === mk).reduce((a, f) => a + f.amount, 0);
-  const noSetup = !S.settings.expectedIncome && !incomeIn(mk);
+  const noSetup = !incomeIn(mk);
   const unsorted = unsortedTxns();
   // traffic light: compare what's left with how much of the month is left
-  const share = s.start > 0 ? s.safe / s.start : 0, timeLeft = daysLeft / dim(mk);
-  const st = noSetup ? null : s.safe < 0 ? ["stop", "🔴", "Stop spending — we're over"] : share < timeLeft * .75 || share < .1 ? ["slow", "🟡", "Slow down a little"] : ["good", "🟢", "We're doing fine"];
+  const st = noSetup ? null : s.safe < 0 ? ["stop", "🔴", "Stop spending — we're over"] : s.safe < s.income * .15 ? ["slow", "🟡", "Slow down a little"] : ["good", "🟢", "We're doing fine"];
+  const paysIn = incomeList(mk);
   const cameIn = incomeIn(mk), usual = S.settings.expectedIncome || 0;
 
   return `
@@ -480,8 +496,8 @@ function viewHome() {
       <div class="big ${s.safe < 0 ? "over" : ""}">${money(s.safe)}</div>
       ${st ? `<div class="status ${st[0]}"><span aria-hidden="true">${st[1]}</span>${st[2]}</div>` : ""}
       <div class="hero-sub">${noSetup
-        ? `Open <b>Settings</b> and type your usual monthly take-home pay, or tap <b>We got paid</b> when a paycheck comes in.`
-        : s.safe < 0 ? `We've spent <b>${money(-s.safe)}</b> more than this month can cover.`
+        ? `No pay logged yet this month. Tap <b>We got paid</b> when a paycheck comes in.`
+        : s.safe < 0 ? `Spending, bills still due and tithing add up to <b>${money(-s.safe)}</b> more than what's come in so far.`
         : `That's about <b>${money(perDay)} a day</b> for the ${daysLeft} day${daysLeft > 1 ? "s" : ""} left.`}</div>
       <div class="mini-stats">
         <div><span>Came in</span>${money(cameIn)}${usual ? ` <small class="muted">of usual ${money(usual)}</small>` : ""}</div>
@@ -504,13 +520,15 @@ function viewHome() {
     <div class="muted" style="font-size:12.5px">Only you see what you spend here.</div></div>
     <button class="btn sm" type="button" id="funBtn">Log</button></div></section>` : ""}
 
+  ${payListSection(mk, paysIn, true)}
+
   ${givingCard(mk)}
 
   <section><div class="sec-h"><h2>Coming up</h2><button class="link" type="button" data-go="bills">All bills</button></div>
     <div class="list">${upcoming.length ? upcoming.map(b => {
-      const overdue = `${mk}-${pad(b.day)}` < today;
+      const overdue = b.dueDate < today;
       return `<div class="item"><span class="dot" style="background:${overdue ? "var(--over)" : "var(--gold)"}"></span>
-        <span class="main"><span class="t">${esc(b.name)}</span><span class="s">${overdue ? "Overdue · " : "Due "}${dayLabel(`${mk}-${pad(b.day)}`)}</span></span>
+        <button class="main" type="button" data-bill="${esc(b.id)}" style="background:none;border:0;text-align:left;padding:0;min-width:0"><span class="t">${esc(b.name)}</span><span class="s" style="${overdue ? "color:var(--over)" : ""}">${overdue ? "Overdue · was due " : "Due "}${dayLabel(b.dueDate)}</span></button>
         <span class="amt">${money(b.amount, true)}</span><button class="btn sm ghost" type="button" data-pay="${esc(b.id)}">Paid</button></div>`;
     }).join("") : `<div class="empty"><b>Nothing due</b>${S.bills.length ? "Every bill this month is paid." : "Add bills that repeat (rent, power, phone) on the Bills tab."}</div>`}</div></section>
 
@@ -518,6 +536,21 @@ function viewHome() {
     <div class="list">${recent.length ? recent.map(txnRow).join("") : `<div class="empty"><b>Nothing logged yet</b>Tap <b style="display:inline">I spent money</b> above to add the first one.</div>`}</div></section>`;
 }
 
+function incomeList(mk) { return txnsIn(mk).filter(t => t.type === "income").sort((a, b) => (b.date + (b.ts || 0)).localeCompare(a.date + (a.ts || 0))); }
+function payListSection(mk, list, home) {
+  const total = list.reduce((a, t) => a + t.amount, 0);
+  const byWho = {}; list.forEach(t => { const w = earnerOf(t) || "Not set"; byWho[w] = (byWho[w] || 0) + t.amount; });
+  const split = Object.entries(byWho).map(([w, v]) => `${esc(w)} ${money(v)}`).join(" · ");
+  return `<section><div class="sec-h"><h2>Money that came in · ${esc(monthName(mk, true))}</h2><span class="amt pos">${money(total)}</span></div>
+    ${list.length > 1 ? `<p class="muted" style="font-size:14px;margin:0 0 8px">${split}</p>` : ""}
+    <div class="list">${list.length ? list.map(t => {
+      const who = earnerOf(t);
+      return `<button class="item" type="button" data-txn="${esc(t.id)}"><span style="font-size:24px;line-height:1;flex:none;width:30px;text-align:center" aria-hidden="true">${kindOf(t.source).slice(-1)[0]}</span>
+        <span class="main"><span class="t">${esc(dayLabel(t.date))} · ${who ? `Paid to ${esc(who)}` : `<span style="color:var(--warn)">Who? Tap to set</span>`}</span>
+        <span class="s">${esc(t.source ? kindOf(t.source)[1] : (t.payee || "Money in"))} · added by ${esc(nameOf(t.by))}</span></span>
+        <span class="amt pos">+${money(t.amount, true)}</span></button>`; }).join("")
+      : `<div class="empty"><b>Nothing yet</b>${home ? "Tap <b style=\"display:inline\">We got paid</b> each time a paycheck, overtime, commission or side money comes in." : "No pay logged this month."}</div>`}</div></section>`;
+}
 function givingCard(mk) {
   if (!titheOn() && !fastAmt()) return "";
   const owed = titheOwed(mk), tPaid = paidTo(TITHE, mk), fPaid = paidTo(FAST, mk), fs = fastSunday(mk);
@@ -534,7 +567,7 @@ function givingCard(mk) {
   };
   return `<section><div class="sec-h"><h2>Tithing &amp; offerings</h2><span class="muted" style="font-size:13px">${esc(monthName(mk, true))}</span></div>
     <div class="list">
-      ${titheOn() ? row("Tithing", owed ? `${Math.round(titheRate() * 100)}% of ${money(plannedIncome(mk))} income` : "Log income or set your usual pay in Settings", tPaid, owed, TITHE, "Tithing") : ""}
+      ${titheOn() ? row("Tithing", owed ? `${Math.round(titheRate() * 100)}% of ${money(plannedIncome(mk))} income` : "Tap We got paid when money comes in", tPaid, owed, TITHE, "Tithing") : ""}
       ${fastAmt() ? row("Fast offering", `Fast Sunday is ${dayLabel(fs)}`, fPaid, fastAmt(), FAST, "Fast offering") : ""}
       <div style="padding:10px 14px;border-top:1px solid var(--line);font-size:12.5px" class="muted">${y} so far: ${money(ytdTithe, true)} tithing${ytdInc ? ` (${(ytdTithe / ytdInc * 100).toFixed(1)}% of ${money(ytdInc)} logged income)` : ""} · ${money(ytdFast, true)} fast offerings. Handy for tithing declaration.</div>
     </div></section>`;
@@ -584,7 +617,7 @@ function viewBudget() {
     const unassigned = plannedIncome(mk) - totalB - goalPlanTotal() - allowanceTotal();
     body = `<div class="flexcard row between" style="flex-wrap:wrap">
         <div><div class="eyebrow">Not planned yet</div><div style="font-family:var(--f-display);font-weight:700;font-size:26px" class="${unassigned < 0 ? "neg" : ""}">${money(unassigned)}</div></div>
-        <div class="muted" style="font-size:12.5px;max-width:26em">Money coming in (${money(plannedIncome(mk))}) that hasn't been given a category, goal or fun money yet. Aim for $0 so every dollar has a job.</div></div>
+        <div class="muted" style="font-size:12.5px;max-width:26em">Pay that has actually come in (${money(plannedIncome(mk))}) minus every category budget, goal and fun money. Below $0 means more is planned than has come in so far.</div></div>
       <div class="list">${groups.map(([g, label]) => {
         const cs = sortCats(S.cats.filter(c => (c.group || "flex") === g));
         if (!cs.length) return "";
@@ -613,6 +646,7 @@ function viewBudget() {
     ${S.cats.length ? `<div style="margin-top:10px"><button class="link" type="button" id="addCat">+ Add a category</button></div>` : ""}
   </section>
   ${report}
+  ${payListSection(mk, incomeList(mk), false)}
   <section><div class="sec-h"><h2>Everything in ${esc(monthName(mk, true))}</h2></div>
     <div class="list">${txnsIn(mk).length ? [...txnsIn(mk)].sort((a, b) => b.date.localeCompare(a.date)).map(txnRow).join("") : `<div class="empty">Nothing logged this month.</div>`}</div></section>`;
 }
@@ -630,7 +664,7 @@ function viewBills() {
     const bs = bills.filter(b => b.day === d);
     cells += `<div class="d ${ds === today ? "today" : ""}"><span class="n">${d}</span>${bs.map(b => `<span class="pill ${b.paid ? "paid" : ""}" title="${esc(b.name)} ${money(b.amount, true)}">${esc(b.name)}</span>`).join("")}</div>`;
   }
-  const total = bills.reduce((a, b) => a + (b.amount || 0), 0), paid = bills.filter(b => b.paid).reduce((a, b) => a + b.amount, 0);
+  const total = bills.reduce((a, b) => a + (b.paid ? b.paidAmt : (b.amount || 0)), 0), paid = bills.filter(b => b.paid).reduce((a, b) => a + b.paidAmt, 0);
   const freqLabel = { monthly: "Monthly", quarterly: "Every 3 months", yearly: "Yearly" };
   return `<section>
     <div class="sec-h" style="flex-wrap:wrap">
@@ -640,11 +674,12 @@ function viewBills() {
     <div class="cal">${cells}</div>
   </section>
   <section><div class="sec-h"><h2>Bills this month</h2><button class="link" type="button" id="addBill">+ Add a bill</button></div>
+    <p class="muted" style="font-size:14px;margin:0 0 8px">Tap a bill to change this month's due date or when it was paid.</p>
     <div class="list">${bills.length ? bills.map(b => `<div class="item"><span class="dot" style="background:${b.paid ? "var(--ok)" : "var(--gold)"}"></span>
       <button class="main" type="button" data-bill="${esc(b.id)}" style="background:none;border:0;text-align:left;padding:0;min-width:0"><span class="t" style="display:block">${esc(b.name)}</span>
-      <span class="s" style="display:block">Day ${b.day} · ${freqLabel[b.freq || "monthly"]}${catById(b.categoryId) ? " · " + esc(catById(b.categoryId).name) : ""}</span></button>
-      <span class="amt">${money(b.amount, true)}</span>
-      ${b.paid ? `<button class="chip ok" type="button" data-unpay="${esc(b.id)}" style="background:none">Paid ✓</button>` : `<button class="btn sm ghost" type="button" data-pay="${esc(b.id)}">Mark paid</button>`}</div>`).join("")
+      <span class="s" style="display:block;white-space:normal">Due ${dayLabel(b.dueDate)}${b.paid ? ` · <b style="color:var(--ok)">Paid ${b.paidDate ? dayLabel(b.paidDate) : ""}</b>${b.paidDate && b.paidDate > b.dueDate ? ` <span style="color:var(--over)">(late)</span>` : ""}` : b.dueDate < today ? ` · <b style="color:var(--over)">Overdue</b>` : ""}</span></button>
+      <span class="amt">${money(b.paid ? b.paidAmt : b.amount, true)}</span>
+      ${b.paid ? `<button class="chip ok" type="button" data-bill="${esc(b.id)}" style="background:none">Paid ✓</button>` : `<button class="btn sm ghost" type="button" data-pay="${esc(b.id)}">Mark paid</button>`}</div>`).join("")
       : `<div class="empty"><b>No bills due in ${esc(monthName(mk, true))}</b>Add the mortgage, utilities, phone and anything else that repeats. Marking one paid logs the expense for you.</div>`}</div></section>`;
 }
 
@@ -728,13 +763,13 @@ function mountJar() {
   const fresh = jar.cv !== cv; jar.cv = cv; jar.ctx = cv.getContext("2d");
   if (!jar.h.length) for (let i = 0; i < jar.N; i++) { jar.h.push(0); jar.v.push(0); }
   const s = safeToSpend(curMonth());
-  const start = s.start > 0 ? s.start : Math.max(1, s.income);
+  const start = Math.max(1, s.income);
   const nt = s.safe <= 0 ? .04 : clamp(s.safe / start, .06, 1);
   if (jar.inited && Math.abs(nt - jar.target) > .002) splash(.5, (jar.target - nt) * 60);
   jar.inited = true;
   jar.target = nt; jar.over = s.safe < 0;
   const d = dim(curMonth()), day = Number(todayStr().slice(8));
-  jar.pace = s.start > 0 ? clamp((d - day + 1) / d, 0, 1) : null;
+  jar.pace = null;
   if (fresh) {
     jarColors(); sizeJar();
     if (jar.ro) jar.ro.disconnect(); jar.ro = new ResizeObserver(sizeJar); jar.ro.observe(cv);
@@ -884,7 +919,7 @@ function chooseSheet() {
 
 function quickEntry(kind) {
   const inc = kind === "income";
-  const st = { amt: "", date: todayStr(), payee: "", note: "", step: 1, showAll: false, extra: false };
+  const st = { amt: "", date: todayStr(), payee: "", note: "", step: 1, showAll: false, extra: false, kind: "pay" };
   const shown = () => st.amt ? "$" + (st.amt.includes(".") ? (() => { const [w, d] = st.amt.split("."); return Number(w || 0).toLocaleString() + "." + d; })() : Number(st.amt).toLocaleString()) : "$0";
   const cents = () => parseMoney(st.amt || "0");
   const press = k => {
@@ -907,11 +942,11 @@ function quickEntry(kind) {
       : `<button class="link more-link" type="button" id="qe-extra">Different day, or add where / a note</button>`}
     <button class="btn ghost wide" type="button" data-close>Cancel</button>`;
   const step2 = () => inc ? `
-    <div class="step-h">Where did ${money(cents(), true)} come from?</div><div class="pad-sub">Tap one and you're done.</div>
-    <div class="bigcats">${earners().map(e => `<button class="bigcat" type="button" data-src="pay" data-who="${esc(e.name)}"><span class="ic" aria-hidden="true">💵</span>${esc(e.name)}'s paycheck</button>`).join("")}
-      <button class="bigcat" type="button" data-src="commission"><span class="ic" aria-hidden="true">💼</span>Commission or bonus</button>
-      <button class="bigcat" type="button" data-src="side"><span class="ic" aria-hidden="true">🛠️</span>Side hustle</button>
-      <button class="bigcat" type="button" data-src="other"><span class="ic" aria-hidden="true">🎁</span>Other money</button></div>
+    <div class="step-h">Who got paid ${money(cents(), true)}?</div>
+    <div class="pad-sub">${st.date === todayStr() ? "Today" : dayLabel(st.date)} · change the kind below if it isn't a paycheck</div>
+    <div class="chips" data-chips="kind" style="justify-content:center;margin-bottom:14px">${PAY_KINDS.map(([v, l, ic]) => `<button type="button" data-v="${v}" aria-pressed="${v === st.kind}">${ic} ${l}</button>`).join("")}</div>
+    <div class="bigcats">${earners().map(e => `<button class="bigcat" type="button" data-who="${esc(e.name)}"><span class="ic" aria-hidden="true">🙋</span>${esc(e.name)}</button>`).join("")}</div>
+    <button class="btn ghost wide" type="button" data-who="${BOTH}">${BOTH} / family</button>
     <div class="backrow"><button class="btn ghost" type="button" id="qe-back">‹ Back</button><button class="btn ghost" type="button" data-close>Cancel</button></div>`
     : `
     <div class="step-h">What was ${money(cents(), true)} for?</div><div class="pad-sub">Tap one and you're done.</div>
@@ -924,7 +959,7 @@ function quickEntry(kind) {
     const ok = await save(() => store.set("txns", id, data));
     if (!ok) return;
     let msg;
-    if (inc) { const tithe = titheOn() ? Math.round(data.amount * titheRate()) : 0; msg = `✓ ${money(data.amount, true)} added${tithe ? ` · tithing on it: ${money(tithe, true)}` : ""}`; }
+    if (inc) { const tithe = titheOn() ? Math.round(data.amount * titheRate()) : 0; msg = `✓ ${money(data.amount, true)} to ${data.earner}, ${dayLabel(data.date)}${tithe ? ` · tithing: ${money(tithe, true)}` : ""}`; }
     else { const c = catById(data.categoryId); msg = `✓ ${money(data.amount, true)} saved${c ? " · " + c.name : ""}`; }
     toast(msg, () => save(() => store.del("txns", id), "Removed"));
   };
@@ -940,9 +975,10 @@ function quickEntry(kind) {
       $("#qe-back").onclick = () => { st.step = 1; draw(); };
       const all = sh.querySelector("[data-allcats]"); if (all) all.onclick = () => { st.showAll = true; draw(); };
       sh.querySelectorAll("[data-pick]").forEach(b => b.onclick = () => finish({ type: "expense", categoryId: b.dataset.pick || null, payee: st.payee }));
-      const label = { commission: "Commission or bonus", side: "Side hustle", other: "Other money" };
-      sh.querySelectorAll("[data-src]").forEach(b => b.onclick = () => finish({ type: "income", categoryId: null, source: b.dataset.src, earner: b.dataset.who || null,
-        payee: st.payee || (b.dataset.src === "pay" ? `${b.dataset.who}'s paycheck` : label[b.dataset.src]) }));
+      const kc = sh.querySelector('[data-chips="kind"]');
+      if (kc) { wireChips(sh); kc.addEventListener("change", () => { st.kind = chipVal(sh, "kind") || "pay"; }); }
+      sh.querySelectorAll("[data-who]").forEach(b => b.onclick = () => finish({ type: "income", categoryId: null, source: st.kind, earner: b.dataset.who,
+        payee: st.payee || payLabel(b.dataset.who, st.kind) }));
     }
   };
   openSheet("", null, null);
@@ -1001,13 +1037,15 @@ function txnSheet(t) {
       <div class="field" style="margin-top:12px"><label for="tx-amt">Amount</label><input class="money-in" id="tx-amt" inputmode="decimal" placeholder="$0.00" value="${t.amount ? (t.amount / 100).toFixed(2) : ""}" autocomplete="off"></div>
       <div class="two"><div class="field"><label for="tx-payee">Where / from</label><input id="tx-payee" value="${esc(t.payee || "")}" placeholder="Costco" autocomplete="off"></div>
         <div class="field"><label for="tx-date">Date</label><input id="tx-date" type="date" value="${esc(t.date)}"></div></div>
+      <div id="tx-incwrap"><div class="field"><span class="lbl">Who got paid</span>${chipsHtml("who", earners().map(e => [e.name, e.name]).concat([[BOTH, BOTH]]), earnerOf(t))}</div>
+        <div class="field"><span class="lbl">What kind</span>${chipsHtml("kind", PAY_KINDS.map(([v, l, ic]) => [v, ic + " " + l]), t.source || "pay")}</div></div>
       <div class="field" id="tx-catwrap"><span class="lbl">What it was for</span>${catOpts.length ? chipsHtml("cat", catOpts, t.categoryId) : `<span class="muted" style="font-size:14px">Add categories on the Budget tab.</span>`}</div>
       <div class="field"><label for="tx-note">Note</label><input id="tx-note" value="${esc(t.note || "")}" placeholder="Optional" autocomplete="off"></div>
       <p class="err" id="tx-err"></p>
       <div class="actions"><button class="btn danger" type="button" id="tx-del">Delete</button><span class="spacer"></span><button class="btn ghost" type="button" data-close>Cancel</button><button class="btn gold" type="submit">Save</button></div>
     </form>`, root => {
       wireChips(root);
-      const sync = () => { const inc = chipVal(root, "type") === "income"; $("#tx-catwrap").hidden = inc; };
+      const sync = () => { const inc = chipVal(root, "type") === "income"; $("#tx-catwrap").hidden = inc; $("#tx-incwrap").hidden = !inc; };
       root.querySelector('[data-chips="type"]').addEventListener("change", sync); sync();
       root.querySelector("[data-close]").onclick = closeSheet;
       $("#tx-del").onclick = () => deleteTxn(S.txns.find(x => x.id === t.id) || t);
@@ -1018,6 +1056,12 @@ function txnSheet(t) {
         const type = chipVal(root, "type");
         const data = { type, amount, payee: $("#tx-payee").value.trim(), date: $("#tx-date").value || todayStr(), note: $("#tx-note").value.trim(),
           categoryId: type === "income" ? null : chipVal(root, "cat") };
+        if (type === "income") {
+          data.earner = chipVal(root, "who") || null; data.source = chipVal(root, "kind") || "pay";
+          if (!data.earner) { $("#tx-err").textContent = "Pick who got paid."; return; }
+          const auto = !t.payee || t.payee === payLabel(earnerOf(t), t.source) || /'s paycheck$|^Commission|^Side hustle|^Other money/.test(t.payee);
+          if (auto || data.payee === t.payee) data.payee = payLabel(data.earner, data.source);
+        }
         if (await save(() => store.update("txns", t.id, data), "Saved")) closeSheet();
       };
     });
@@ -1029,7 +1073,7 @@ function txnDetail(id) {
   openSheet(`<div style="text-align:center;font-size:36px" aria-hidden="true">${inc ? "💵" : iconOf(c)}</div>
     <div class="pad-amt ${inc ? "pos" : ""}" style="font-size:42px;min-height:0">${inc ? "+" : ""}${money(t.amount, true)}</div>
     <div class="pad-sub" style="font-size:16px">${esc(t.payee || (inc ? "Money in" : c ? c.name : "Spent"))}</div>
-    <dl class="kv"><dt>Date</dt><dd>${dayLabel(t.date)}</dd>${inc ? "" : `<dt>For</dt><dd>${esc(c ? c.name : "Needs a category")}</dd>`}
+    <dl class="kv"><dt>Date</dt><dd>${dayLabel(t.date)}</dd>${inc ? `<dt>Paid to</dt><dd>${esc(earnerOf(t) || "Not set — tap Fix it")}</dd><dt>Kind</dt><dd>${esc(kindOf(t.source)[1])}</dd>` : `<dt>For</dt><dd>${esc(c ? c.name : "Needs a category")}</dd>`}
       <dt>Added by</dt><dd>${esc(nameOf(t.by))}</dd>${t.note ? `<dt>Note</dt><dd>${esc(t.note)}</dd>` : ""}</dl>
     ${!inc && !c ? `<button class="btn gold wide" type="button" data-sortone>Pick a category</button>` : ""}
     <div class="actions" style="margin-top:12px"><button class="btn danger" type="button" data-del>Delete</button><span class="spacer"></span><button class="btn ghost" type="button" data-edit>Fix it</button><button class="btn" type="button" data-close>Done</button></div>`, root => {
@@ -1067,8 +1111,8 @@ function billSheet(b) {
   const catOpts = [["", "None"]].concat([...S.cats].sort((x, y) => x.name.localeCompare(y.name)).map(c => [c.id, c.name]));
   openSheet(`<h3>${edit ? "Edit bill" : "New bill"}</h3><form id="bf" novalidate>
     <div class="field"><label for="b-name">Name</label><input id="b-name" value="${esc(b.name || "")}" placeholder="Rocky Mountain Power" autocomplete="off"></div>
-    <div class="two"><div class="field"><label for="b-amt">Amount</label><input id="b-amt" inputmode="decimal" value="${b.amount ? (b.amount / 100).toFixed(2) : ""}" placeholder="$0.00"></div>
-      <div class="field"><label for="b-day">Due day</label><input id="b-day" type="number" min="1" max="31" value="${b.dueDay || 1}"></div></div>
+    <div class="two"><div class="field"><label for="b-amt">Usual amount</label><input id="b-amt" inputmode="decimal" value="${b.amount ? (b.amount / 100).toFixed(2) : ""}" placeholder="$0.00"></div>
+      <div class="field"><label for="b-day">Usual due day</label><input id="b-day" type="number" min="1" max="31" value="${b.dueDay || 1}"></div></div>
     <div class="field"><span class="lbl">How often</span>${chipsHtml("freq", [["monthly", "Monthly"], ["quarterly", "Every 3 months"], ["yearly", "Yearly"]], b.freq || "monthly")}</div>
     <div class="field"><label for="b-start">First due in</label><input id="b-start" type="month" value="${esc(b.startMonth || S.billMonth)}"></div>
     <div class="field"><label for="b-cat">Category for the payment</label><select id="b-cat">${catOpts.map(([v, l]) => `<option value="${esc(v)}" ${v === (b.categoryId || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>
@@ -1093,15 +1137,78 @@ async function giveNow(catId, amount, payee) {
   if (await save(() => store.set("txns", id, { type: "expense", amount, payee, date: todayStr(), categoryId: catId, whose: "ours", by: S.uid, ts: Date.now(), note: "" })))
     toast(`✓ ${payee} ${money(amount, true)} logged`, () => save(() => store.del("txns", id), "Removed"));
 }
-async function payBill(id, mk) {
-  const b = S.bills.find(x => x.id === id); if (!b) return;
-  const day = Math.min(b.dueDay || 1, dim(mk)); const t = todayStr();
-  const date = mkey(t) === mk ? t : `${mk}-${pad(day)}`;
+async function payBill(id, mk, date, amount) {
+  const b = S.bills.find(x => x.id === id); if (!b) return false;
   const tid = uidGen();
-  await save(async () => {
-    await store.set("txns", tid, { type: "expense", amount: b.amount, payee: b.name, date, categoryId: b.categoryId || null, whose: "ours", by: S.uid, ts: Date.now(), billId: b.id, note: "" });
+  return save(async () => {
+    await store.set("txns", tid, { type: "expense", amount: amount || b.amount, payee: b.name, date: date || todayStr(), categoryId: b.categoryId || null, whose: "ours", by: S.uid, ts: Date.now(), billId: b.id, note: "" });
     await store.update("bills", id, { paid: { ...(b.paid || {}), [mk]: tid } });
-  }, `${b.name} marked paid`);
+  }, `✓ ${b.name} paid ${dayLabel(date || todayStr())}`);
+}
+
+/* one bill, one month: the real due date, and when (and how much) it was paid */
+function billMonthSheet(id, mk) {
+  const b = billsIn(mk).find(x => x.id === id); if (!b) return;
+  const plusDays = (s, n) => { const [y, m, d] = s.split("-").map(Number); const x = new Date(y, m - 1, d + n); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
+  const today = todayStr(), yest = plusDays(today, -1);
+  const first = `${mk}-01`, last = `${mk}-${pad(dim(mk))}`;
+  const amt = (b.paid ? b.paidAmt : b.amount) / 100;
+  openSheet(`<div class="step-h">${esc(b.name)}</div><div class="pad-sub">${esc(monthName(mk))}</div>
+    <form id="bmf" novalidate>
+      <div class="field"><label for="bm-due">Due date this month</label><input id="bm-due" type="date" min="${first}" max="${last}" value="${esc(b.dueDate)}">
+        <span class="muted" style="font-size:14px">Change it if this month's bill says a different date. Other months stay on day ${b.dueDay || 1}.</span></div>
+      <div class="field"><label for="bm-amt">${b.paid ? "Amount paid" : "Amount"}</label><input class="money-in" id="bm-amt" inputmode="decimal" value="${amt ? amt.toFixed(2) : ""}" placeholder="$0.00"></div>
+      ${b.paid ? `
+        <div class="field"><label for="bm-paid">Paid on</label><input id="bm-paid" type="date" value="${esc(b.paidDate || today)}"></div>
+        <p class="err" id="bm-err"></p>
+        <button class="btn gold wide" type="submit">Save</button>
+        <button class="link more-link" type="button" id="bm-unpay" style="color:var(--over)">It wasn't paid. Undo "paid"</button>`
+      : `
+        <span class="lbl">When was it paid?</span>
+        <div class="bigcats" style="margin-top:8px">
+          <button class="bigcat" type="button" data-when="${today}"><span class="ic" aria-hidden="true">✅</span>Today</button>
+          <button class="bigcat" type="button" data-when="${yest}"><span class="ic" aria-hidden="true">↩️</span>Yesterday</button></div>
+        <div class="field" style="margin-top:12px"><label for="bm-paid">Or pick the day</label><input id="bm-paid" type="date" value=""></div>
+        <p class="err" id="bm-err"></p>
+        <button class="btn gold wide" type="submit">Save</button>`}
+      <div class="backrow"><button class="link" type="button" id="bm-edit">Change name, usual amount or usual day</button><button class="btn ghost" type="button" data-close>Close</button></div>
+    </form>`, root => {
+      root.querySelector("[data-close]").onclick = closeSheet;
+      $("#bm-edit").onclick = () => billSheet(S.bills.find(x => x.id === id));
+      const fresh = () => S.bills.find(x => x.id === id) || b;
+      const saveDue = async () => {
+        const due = $("#bm-due").value;
+        if (!due || due === b.dueDate) return true;
+        const dueOn = { ...(fresh().dueOn || {}) };
+        if (due === `${mk}-${pad(Math.min(b.dueDay || 1, dim(mk)))}`) delete dueOn[mk]; else dueOn[mk] = due;
+        return save(() => store.update("bills", id, { dueOn }));
+      };
+      const amount = () => { const v = parseMoney($("#bm-amt").value); return v > 0 ? v : 0; };
+      const markPaid = async date => {
+        if (!amount()) { $("#bm-err").textContent = "Type the amount above $0."; return; }
+        if (!(await saveDue())) return;
+        if (await payBill(id, mk, date, amount())) closeSheet();
+      };
+      root.querySelectorAll("[data-when]").forEach(x => x.onclick = () => markPaid(x.dataset.when));
+      const un = $("#bm-unpay"); if (un) un.onclick = async () => { closeSheet(); await unpayBill(id, mk); };
+      $("#bmf").onsubmit = async e => {
+        e.preventDefault();
+        if (!b.paid) {
+          const d = $("#bm-paid").value;
+          if (d) return markPaid(d);
+          if (await saveDue()) { closeSheet(); toast("Due date saved"); }
+          return;
+        }
+        const d = $("#bm-paid").value || b.paidDate || today;
+        if (!amount()) { $("#bm-err").textContent = "Type the amount above $0."; return; }
+        if (!(await saveDue())) return;
+        const tid = fresh().paid && fresh().paid[mk];
+        const ok = tid && S.txns.find(t => t.id === tid)
+          ? await save(() => store.update("txns", tid, { date: d, amount: amount() }))
+          : await save(async () => { const nt = uidGen(); await store.set("txns", nt, { type: "expense", amount: amount(), payee: b.name, date: d, categoryId: b.categoryId || null, whose: "ours", by: S.uid, ts: Date.now(), billId: id, note: "" }); await store.update("bills", id, { paid: { ...(fresh().paid || {}), [mk]: nt } }); });
+        if (ok) { closeSheet(); toast(`✓ Saved · paid ${dayLabel(d)}`); }
+      };
+    });
 }
 async function unpayBill(id, mk) {
   const b = S.bills.find(x => x.id === id); if (!b) return;
@@ -1188,8 +1295,8 @@ function settingsSheet() {
   const s = S.settings; const m = v => v ? (v / 100).toFixed(0) : "";
   openSheet(`<h3>Settings</h3><form id="sf" novalidate>
     <div class="field"><label for="s-name">Your first name</label><input id="s-name" value="${esc(S.names[S.uid] || "")}" placeholder="Shown on the paycheck button" autocomplete="given-name"></div>
-    <div class="field"><label for="s-inc">Usual monthly take-home pay (both of you, before overtime or commission)</label><input id="s-inc" inputmode="decimal" value="${m(s.expectedIncome)}" placeholder="$7,500">
-      <span class="muted" style="font-size:14px">Each month starts by counting on this much. When the paychecks, overtime, commissions and side money you add with <b>We got paid</b> come to more, the real total is used instead.</span></div>
+    <div class="field"><label for="s-inc">Usual monthly take-home pay (optional, for comparison)</label><input id="s-inc" inputmode="decimal" value="${m(s.expectedIncome)}" placeholder="$7,500">
+      <span class="muted" style="font-size:14px">The budget only counts pay you've added with <b>We got paid</b>. This number is only shown next to it as "of usual", so you can see how the month compares.</span></div>
     <div class="field"><label for="s-fun">Fun money, each, per month</label><input id="s-fun" inputmode="decimal" value="${m(s.allowance)}" placeholder="$150"></div>
     <div class="two"><label class="check" style="margin:0 0 12px"><input type="checkbox" id="s-tithe" ${s.tithing !== false ? "checked" : ""}><span>Track tithing</span></label>
       <div class="field"><label for="s-pct">Tithing %</label><input id="s-pct" inputmode="decimal" value="${s.tithePct ?? 10}"></div></div>
@@ -1221,9 +1328,8 @@ document.addEventListener("click", e => {
   if (d.go) { S.tab = d.go; render(); window.scrollTo(0, 0); return; }
   if (d.txn) return txnDetail(d.txn);
   if (d.give) return giveNow(d.give, +d.amt || 0, d.payee);
-  if (d.pay) return payBill(d.pay, S.tab === "bills" ? S.billMonth : curMonth());
+  if (d.pay || d.bill) return billMonthSheet(d.pay || d.bill, S.tab === "bills" ? S.billMonth : curMonth());
   if (d.unpay) return unpayBill(d.unpay, S.billMonth);
-  if (d.bill) return billSheet(S.bills.find(b => b.id === d.bill));
   if (d.cat) return catSheet(catById(d.cat));
   if (d.goal) return goalSheet(S.goals.find(g => g.id === d.goal));
   if (d.acct) return acctSheet(S.accts.find(a => a.id === d.acct));
