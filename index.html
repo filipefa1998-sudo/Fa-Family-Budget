@@ -408,9 +408,17 @@ function billDue(b, mk) {
 }
 const billsIn = mk => S.bills.filter(b => billDue(b, mk)).map(b => {
   const dueDate = (b.dueOn && b.dueOn[mk]) || `${mk}-${pad(Math.min(b.dueDay || 1, dim(mk)))}`;
+  const base = { ...b, dueDate, day: Number(dueDate.slice(8)), moved: !!(b.dueOn && b.dueOn[mk]) };
+  if (b.split) {
+    // paid in parts (like Flex rent): each part is its own payment with its own date
+    const dueAmt = (b.amtOn && b.amtOn[mk]) || b.amount || 0;
+    const parts = ((b.parts && b.parts[mk]) || []).map(id => S.txns.find(t => t.id === id)).filter(Boolean).sort((x, y) => x.date.localeCompare(y.date));
+    const sum = parts.reduce((a, t) => a + t.amount, 0);
+    return { ...base, dueAmt, parts, partSum: sum, paid: dueAmt > 0 && sum >= dueAmt, remaining: Math.max(0, dueAmt - sum), paidDate: parts.length ? parts[parts.length - 1].date : null, paidAmt: sum };
+  }
   const tid = b.paid && b.paid[mk], tx = tid ? S.txns.find(t => t.id === tid) : null;
-  return { ...b, dueDate, day: Number(dueDate.slice(8)), moved: !!(b.dueOn && b.dueOn[mk]), paid: !!tid, paidTxn: tx, paidDate: tx ? tx.date : null, paidAmt: tx ? tx.amount : (b.amount || 0) };
-}).filter(b => !(S.settings.startedOn && b.dueDate < S.settings.startedOn && !b.paid)) // due before a fresh start: not counted
+  return { ...base, dueAmt: b.amount || 0, paid: !!tid, remaining: tid ? 0 : (b.amount || 0), paidTxn: tx, paidDate: tx ? tx.date : null, paidAmt: tx ? tx.amount : (b.amount || 0) };
+}).filter(b => !(S.settings.startedOn && b.dueDate < S.settings.startedOn && !b.paid && !(b.parts && b.parts.length))) // due before a fresh start: not counted
   .sort((a, b) => a.day - b.day);
 const goalContribIn = (g, mk) => (g.log || []).filter(l => l.d && mkey(l.d) === mk).reduce((a, l) => a + l.amt, 0);
 const goalPlanRemaining = mk => S.goals.filter(g => !g.done).reduce((a, g) => a + Math.max(0, (g.monthly || 0) - goalContribIn(g, mk)), 0);
@@ -431,7 +439,7 @@ function safeToSpend(mk) {
   const income = plannedIncome(mk);
   const bills = billsIn(mk);
   const billsAll = bills.reduce((a, b) => a + (b.amount || 0), 0);
-  const unpaid = bills.filter(b => !b.paid).reduce((a, b) => a + (b.amount || 0), 0);
+  const unpaid = bills.reduce((a, b) => a + (b.remaining || 0), 0);
   const spent = spentIn(mk);
   const start = income - billsAll - goalPlanTotal() - allowanceTotal() - givingPlanned(mk);
   const safe = income - spent - unpaid - goalPlanRemaining(mk) - allowanceTotal() - givingUnpaid(mk);
@@ -529,8 +537,8 @@ function viewHome() {
     <div class="list">${upcoming.length ? upcoming.map(b => {
       const overdue = b.dueDate < today;
       return `<div class="item"><span class="dot" style="background:${overdue ? "var(--over)" : "var(--gold)"}"></span>
-        <button class="main" type="button" data-bill="${esc(b.id)}" style="background:none;border:0;text-align:left;padding:0;min-width:0"><span class="t">${esc(b.name)}</span><span class="s" style="${overdue ? "color:var(--over)" : ""}">${overdue ? "Overdue · was due " : "Due "}${dayLabel(b.dueDate)}</span></button>
-        <span class="amt">${money(b.amount, true)}</span><button class="btn sm ghost" type="button" data-pay="${esc(b.id)}">Paid</button></div>`;
+        <button class="main" type="button" data-bill="${esc(b.id)}" style="background:none;border:0;text-align:left;padding:0;min-width:0"><span class="t">${esc(b.name)}</span><span class="s" style="white-space:normal;${overdue ? "color:var(--over)" : ""}">${overdue ? "Overdue · was due " : "Due "}${dayLabel(b.dueDate)}${b.split && b.partSum ? ` · <span style="color:var(--ok)">${money(b.partSum)} of ${money(b.dueAmt)} paid</span>` : ""}</span></button>
+        <span class="amt">${money(b.remaining, true)}${b.split && b.partSum ? `<small class="muted" style="display:block;font-weight:500;font-size:12px;text-align:right">left</small>` : ""}</span><button class="btn sm ghost" type="button" data-pay="${esc(b.id)}">${b.split ? "Add part" : "Paid"}</button></div>`;
     }).join("") : `<div class="empty"><b>Nothing due</b>${S.bills.length ? "Every bill this month is paid." : "Add bills that repeat (rent, power, phone) on the Bills tab."}</div>`}</div></section>
 
   <section><div class="sec-h"><h2>Recent</h2><span class="muted" style="font-size:14px">Tap one to fix or delete it</span></div>
@@ -665,7 +673,7 @@ function viewBills() {
     const bs = bills.filter(b => b.day === d);
     cells += `<div class="d ${ds === today ? "today" : ""}"><span class="n">${d}</span>${bs.map(b => `<span class="pill ${b.paid ? "paid" : ""}" title="${esc(b.name)} ${money(b.amount, true)}">${esc(b.name)}</span>`).join("")}</div>`;
   }
-  const total = bills.reduce((a, b) => a + (b.paid ? b.paidAmt : (b.amount || 0)), 0), paid = bills.filter(b => b.paid).reduce((a, b) => a + b.paidAmt, 0);
+  const total = bills.reduce((a, b) => a + (b.paid ? b.paidAmt : (b.dueAmt || 0)), 0), paid = bills.reduce((a, b) => a + (b.split ? b.partSum : b.paid ? b.paidAmt : 0), 0);
   const freqLabel = { monthly: "Monthly", quarterly: "Every 3 months", yearly: "Yearly" };
   return `<section>
     <div class="sec-h" style="flex-wrap:wrap">
@@ -678,9 +686,9 @@ function viewBills() {
     <p class="muted" style="font-size:14px;margin:0 0 8px">Tap a bill to change this month's due date or when it was paid.</p>
     <div class="list">${bills.length ? bills.map(b => `<div class="item"><span class="dot" style="background:${b.paid ? "var(--ok)" : "var(--gold)"}"></span>
       <button class="main" type="button" data-bill="${esc(b.id)}" style="background:none;border:0;text-align:left;padding:0;min-width:0"><span class="t" style="display:block">${esc(b.name)}</span>
-      <span class="s" style="display:block;white-space:normal">Due ${dayLabel(b.dueDate)}${b.paid ? ` · <b style="color:var(--ok)">Paid ${b.paidDate ? dayLabel(b.paidDate) : ""}</b>${b.paidDate && b.paidDate > b.dueDate ? ` <span style="color:var(--over)">(late)</span>` : ""}` : b.dueDate < today ? ` · <b style="color:var(--over)">Overdue</b>` : ""}</span></button>
-      <span class="amt">${money(b.paid ? b.paidAmt : b.amount, true)}</span>
-      ${b.paid ? `<button class="chip ok" type="button" data-bill="${esc(b.id)}" style="background:none">Paid ✓</button>` : `<button class="btn sm ghost" type="button" data-pay="${esc(b.id)}">Mark paid</button>`}</div>`).join("")
+      <span class="s" style="display:block;white-space:normal">Due ${dayLabel(b.dueDate)}${b.split ? ` · in parts` : ""}${b.split && b.parts.length ? `<br>${b.parts.map(t => `<span style="color:var(--ok)">${money(t.amount)} on ${dayLabel(t.date)}</span>`).join(" + ")}${b.paid ? "" : ` · <b>${money(b.remaining)} left</b>`}` : ""}${b.paid && !b.split ? ` · <b style="color:var(--ok)">Paid ${b.paidDate ? dayLabel(b.paidDate) : ""}</b>` : ""}${b.paid && !b.split && b.paidDate && b.paidDate > b.dueDate ? ` <span style="color:var(--over)">(late)</span>` : ""}${!b.paid && !(b.split && b.partSum) && b.dueDate < today ? ` · <b style="color:var(--over)">Overdue</b>` : ""}</span></button>
+      <span class="amt">${money(b.paid ? b.paidAmt : b.dueAmt, true)}</span>
+      ${b.paid ? `<button class="chip ok" type="button" data-bill="${esc(b.id)}" style="background:none">Paid ✓</button>` : `<button class="btn sm ghost" type="button" data-pay="${esc(b.id)}">${b.split ? "Add part" : "Mark paid"}</button>`}</div>`).join("")
       : `<div class="empty"><b>No bills due in ${esc(monthName(mk, true))}</b>Add the mortgage, utilities, phone and anything else that repeats. Marking one paid logs the expense for you.</div>`}</div></section>`;
 }
 
@@ -1017,13 +1025,18 @@ function sortSheet() {
 async function deleteTxn(t) {
   const { id, ...data } = t;
   closeSheet();
+  const pb = t.billId && S.bills.find(x => x.id === t.billId);
+  const partMonth = pb && pb.parts ? Object.keys(pb.parts).find(m => (pb.parts[m] || []).includes(id)) : null;
   if (t.billId) {
     const b = S.bills.find(x => x.id === t.billId); const mk = mkey(t.date);
     if (b && b.paid && b.paid[mk] === id) { const p = { ...b.paid }; delete p[mk]; await save(() => store.update("bills", b.id, { paid: p })); }
+    if (b && b.parts) { const parts = {}; Object.entries(b.parts).forEach(([m, ids]) => { parts[m] = ids.filter(x => x !== id); }); await save(() => store.update("bills", b.id, { parts })); }
   }
   if (await save(() => store.del("txns", id))) toast("Deleted", async () => {
     await save(() => store.set("txns", id, data), "Brought back");
-    if (t.billId) { const b = S.bills.find(x => x.id === t.billId); if (b) await save(() => store.update("bills", b.id, { paid: { ...(b.paid || {}), [mkey(t.date)]: id } })); }
+    if (t.billId) { const b = S.bills.find(x => x.id === t.billId); const m = partMonth || mkey(t.date);
+      if (b && b.split) { const parts = { ...(b.parts || {}) }; parts[m] = [...(parts[m] || []), id]; await save(() => store.update("bills", b.id, { parts })); }
+      else if (b) await save(() => store.update("bills", b.id, { paid: { ...(b.paid || {}), [m]: id } })); }
   });
 }
 
@@ -1116,6 +1129,7 @@ function billSheet(b) {
       <div class="field"><label for="b-day">Usual due day</label><input id="b-day" type="number" min="1" max="31" value="${b.dueDay || 1}"></div></div>
     <div class="field"><span class="lbl">How often</span>${chipsHtml("freq", [["monthly", "Monthly"], ["quarterly", "Every 3 months"], ["yearly", "Yearly"]], b.freq || "monthly")}</div>
     <div class="field"><label for="b-start">First due in</label><input id="b-start" type="month" value="${esc(b.startMonth || S.billMonth)}"></div>
+    <label class="check"><input type="checkbox" id="b-split" ${b.split ? "checked" : ""}><span><b>Paid in parts</b> (like Flex rent)<br><span class="muted" style="font-size:14px">Log each part with its own date and amount. It counts as paid once the parts add up to the total.</span></span></label>
     <div class="field"><label for="b-cat">Category for the payment</label><select id="b-cat">${catOpts.map(([v, l]) => `<option value="${esc(v)}" ${v === (b.categoryId || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></div>
     <p class="err" id="b-err"></p>
     <div class="actions">${edit ? `<button class="btn danger" type="button" id="b-del">Delete</button><span class="spacer"></span>` : ""}<button class="btn ghost" type="button" data-close>Cancel</button><button class="btn gold" type="submit">Save</button></div></form>`, root => {
@@ -1126,7 +1140,7 @@ function billSheet(b) {
         if (!name) { $("#b-err").textContent = "Give the bill a name."; return; }
         if (!(amount > 0)) { $("#b-err").textContent = "Enter an amount above $0."; return; }
         if (!(day >= 1 && day <= 31)) { $("#b-err").textContent = "Due day must be 1 to 31."; return; }
-        const data = { name, amount, dueDay: day, freq: chipVal(root, "freq") || "monthly", startMonth: $("#b-start").value || S.billMonth, categoryId: $("#b-cat").value || null };
+        const data = { name, amount, dueDay: day, freq: chipVal(root, "freq") || "monthly", startMonth: $("#b-start").value || S.billMonth, categoryId: $("#b-cat").value || null, split: $("#b-split").checked };
         if (await save(() => edit ? store.update("bills", b.id, data) : store.set("bills", uidGen(), { ...data, paid: {} }), "Saved")) closeSheet();
       };
     });
@@ -1150,6 +1164,7 @@ async function payBill(id, mk, date, amount) {
 /* one bill, one month: the real due date, and when (and how much) it was paid */
 function billMonthSheet(id, mk) {
   const b = billsIn(mk).find(x => x.id === id); if (!b) return;
+  if (b.split) return splitSheet(id, mk);
   const plusDays = (s, n) => { const [y, m, d] = s.split("-").map(Number); const x = new Date(y, m - 1, d + n); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
   const today = todayStr(), yest = plusDays(today, -1);
   const first = `${mk}-01`, last = `${mk}-${pad(dim(mk))}`;
@@ -1172,9 +1187,11 @@ function billMonthSheet(id, mk) {
         <div class="field" style="margin-top:12px"><label for="bm-paid">Or pick the day</label><input id="bm-paid" type="date" value=""></div>
         <p class="err" id="bm-err"></p>
         <button class="btn gold wide" type="submit">Save</button>`}
+      ${b.paid ? "" : `<button class="link more-link" type="button" id="bm-split">Paid in parts, like Flex rent? Switch this bill to split payments</button>`}
       <div class="backrow"><button class="link" type="button" id="bm-edit">Change name, usual amount or usual day</button><button class="btn ghost" type="button" data-close>Close</button></div>
     </form>`, root => {
       root.querySelector("[data-close]").onclick = closeSheet;
+      const sp = $("#bm-split"); if (sp) sp.onclick = async () => { if (await save(() => store.update("bills", id, { split: true }))) setTimeout(() => splitSheet(id, mk), 150); };
       $("#bm-edit").onclick = () => billSheet(S.bills.find(x => x.id === id));
       const fresh = () => S.bills.find(x => x.id === id) || b;
       const saveDue = async () => {
@@ -1211,8 +1228,73 @@ function billMonthSheet(id, mk) {
       };
     });
 }
+/* split bills (Flex rent): add each part as it's taken */
+async function addBillPart(id, mk, date, amount) {
+  const b = S.bills.find(x => x.id === id); if (!b) return false;
+  const tid = uidGen(), parts = { ...(b.parts || {}) }; parts[mk] = [...(parts[mk] || []), tid];
+  return save(async () => {
+    await store.set("txns", tid, { type: "expense", amount, payee: b.name + " (part)", date, categoryId: b.categoryId || null, whose: "ours", by: S.uid, ts: Date.now(), billId: b.id, note: "" });
+    await store.update("bills", id, { parts });
+  });
+}
+function splitSheet(id, mk) {
+  const plusDays = (s, n) => { const [y, m, d] = s.split("-").map(Number); const x = new Date(y, m - 1, d + n); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
+  const today = todayStr(), yest = plusDays(today, -1), first = `${mk}-01`, last = `${mk}-${pad(dim(mk))}`;
+  const body = () => {
+    const b = billsIn(mk).find(x => x.id === id) || {};
+    const pct = b.dueAmt > 0 ? clamp(b.partSum / b.dueAmt, 0, 1) : 0;
+    return `<div class="step-h">${esc(b.name)}</div><div class="pad-sub">${esc(monthName(mk))} · paid in parts</div>
+      <div class="flexcard" style="margin-bottom:14px">
+        <div class="row between"><b style="font-size:18px">${money(b.partSum, true)} of ${money(b.dueAmt, true)} paid</b>${b.paid ? `<span class="chip ok">Paid ✓</span>` : `<b class="neg">${money(b.remaining, true)} left</b>`}</div>
+        <div class="bar" style="height:12px;margin-top:10px"><i style="width:${(pct * 100).toFixed(1)}%"></i></div>
+        ${b.parts.length ? `<div class="list" style="margin-top:12px">${b.parts.map((t, i) => `<div class="item"><span style="font-weight:700;width:58px;flex:none">Part ${i + 1}</span>
+          <span class="main"><span class="t">${money(t.amount, true)}</span><span class="s">Taken ${dayLabel(t.date)} · added by ${esc(nameOf(t.by))}</span></span>
+          <button class="btn sm ghost" type="button" data-fixpart="${esc(t.id)}">Fix</button></div>`).join("")}</div>` : `<p class="muted" style="margin:10px 0 0;font-size:14.5px">No parts taken yet this month.</p>`}
+      </div>
+      ${b.paid ? "" : `<div class="lbl">Add a part</div>
+      <div class="field" style="margin-top:6px"><label for="sp-amt">How much was taken</label><input class="money-in" id="sp-amt" inputmode="decimal" value="${b.remaining ? (b.remaining / 100).toFixed(2) : ""}" placeholder="$0.00"></div>
+      <span class="lbl">When was it taken?</span>
+      <div class="bigcats" style="margin-top:8px"><button class="bigcat" type="button" data-pwhen="${today}"><span class="ic" aria-hidden="true">✅</span>Today</button>
+        <button class="bigcat" type="button" data-pwhen="${yest}"><span class="ic" aria-hidden="true">↩️</span>Yesterday</button></div>
+      <div class="row" style="margin-top:10px"><input id="sp-date" type="date" style="flex:1;min-width:0;background:var(--raise);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:16px"><button class="btn gold" type="button" id="sp-add">Add on this day</button></div>`}
+      <p class="err" id="sp-err"></p>
+      <details style="margin-top:8px"><summary class="link" style="cursor:pointer">Change this month's total or due date</summary>
+        <div class="two" style="margin-top:10px"><div class="field"><label for="sp-total">Total due this month</label><input id="sp-total" inputmode="decimal" value="${(b.dueAmt / 100).toFixed(2)}"></div>
+          <div class="field"><label for="sp-due">Due date</label><input id="sp-due" type="date" min="${first}" max="${last}" value="${esc(b.dueDate)}"></div></div>
+        <button class="btn ghost" type="button" id="sp-savemonth">Save</button></details>
+      <div class="backrow"><button class="link" type="button" id="sp-edit">Bill settings</button><button class="btn ghost" type="button" data-close>Close</button></div>`;
+  };
+  const wire = root => {
+    root.querySelector("[data-close]").onclick = closeSheet;
+    $("#sp-edit").onclick = () => billSheet(S.bills.find(x => x.id === id));
+    root.querySelectorAll("[data-fixpart]").forEach(x => x.onclick = () => { const t = S.txns.find(y => y.id === x.dataset.fixpart); if (t) txnSheet(t); });
+    const add = async date => {
+      const a = parseMoney($("#sp-amt").value);
+      if (!(a > 0)) { $("#sp-err").textContent = "Type how much was taken."; return; }
+      if (!date) { $("#sp-err").textContent = "Pick the day it was taken."; return; }
+      if (await addBillPart(id, mk, date, a)) { toast(`✓ ${money(a, true)} part added · ${dayLabel(date)}`); setTimeout(redraw, 120); }
+    };
+    root.querySelectorAll("[data-pwhen]").forEach(x => x.onclick = () => add(x.dataset.pwhen));
+    const ad = $("#sp-add"); if (ad) ad.onclick = () => add($("#sp-date").value);
+    $("#sp-savemonth").onclick = async () => {
+      const b = S.bills.find(x => x.id === id); if (!b) return;
+      const tot = parseMoney($("#sp-total").value), due = $("#sp-due").value;
+      if (!(tot > 0)) { $("#sp-err").textContent = "Type the total due."; return; }
+      const amtOn = { ...(b.amtOn || {}) }; if (tot === b.amount) delete amtOn[mk]; else amtOn[mk] = tot;
+      const dueOn = { ...(b.dueOn || {}) }; if (!due || due === `${mk}-${pad(Math.min(b.dueDay || 1, dim(mk)))}`) delete dueOn[mk]; else dueOn[mk] = due;
+      if (await save(() => store.update("bills", id, { amtOn, dueOn }), "Saved")) setTimeout(redraw, 120);
+    };
+  };
+  const redraw = () => { const sh = $(".sheet"); if (!sh || !sh.querySelector("#sp-edit")) return; sh.innerHTML = body(); wire(sh); };
+  openSheet(body(), wire, () => { const a = document.activeElement; if (a && /INPUT/.test(a.tagName) && a.closest(".sheet")) return; if (document.querySelector(".sheet details[open]")) return; redraw(); });
+}
 async function unpayBill(id, mk) {
   const b = S.bills.find(x => x.id === id); if (!b) return;
+  if (b.split) {
+    const ids = (b.parts && b.parts[mk]) || []; const parts = { ...(b.parts || {}) }; delete parts[mk];
+    await save(async () => { await store.update("bills", id, { parts }); for (const t of ids) if (S.txns.find(x => x.id === t)) await store.del("txns", t); }, "Parts cleared");
+    return;
+  }
   const tid = b.paid && b.paid[mk]; const p = { ...(b.paid || {}) }; delete p[mk];
   await save(async () => { await store.update("bills", id, { paid: p }); if (tid && S.txns.find(t => t.id === tid)) await store.del("txns", tid); }, "Marked unpaid");
 }
@@ -1366,7 +1448,7 @@ function resetSheet() {
         ["bills", "goals", "accts", "cats"].forEach(c => S[c].forEach(x => ops.push(b => b.delete(db.collection(c).doc(x.id)))));
         ops.push(b => b.set(db.collection("meta").doc("settings"), { mode: "category", expectedIncome: 0, allowance: 0, bigPurchase: 0, tithing: true, tithePct: 10, startedOn: todayStr() }));
       } else {
-        S.bills.forEach(x => ops.push(b => b.update(db.collection("bills").doc(x.id), { paid: {}, dueOn: {} })));
+        S.bills.forEach(x => ops.push(b => b.update(db.collection("bills").doc(x.id), { paid: {}, dueOn: {}, parts: {}, amtOn: {} })));
         ops.push(b => b.set(db.collection("meta").doc("settings"), { startedOn: todayStr() }, { merge: true }));
       }
       try {
