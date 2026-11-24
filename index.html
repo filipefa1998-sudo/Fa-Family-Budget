@@ -410,7 +410,8 @@ const billsIn = mk => S.bills.filter(b => billDue(b, mk)).map(b => {
   const dueDate = (b.dueOn && b.dueOn[mk]) || `${mk}-${pad(Math.min(b.dueDay || 1, dim(mk)))}`;
   const tid = b.paid && b.paid[mk], tx = tid ? S.txns.find(t => t.id === tid) : null;
   return { ...b, dueDate, day: Number(dueDate.slice(8)), moved: !!(b.dueOn && b.dueOn[mk]), paid: !!tid, paidTxn: tx, paidDate: tx ? tx.date : null, paidAmt: tx ? tx.amount : (b.amount || 0) };
-}).sort((a, b) => a.day - b.day);
+}).filter(b => !(S.settings.startedOn && b.dueDate < S.settings.startedOn && !b.paid)) // due before a fresh start: not counted
+  .sort((a, b) => a.day - b.day);
 const goalContribIn = (g, mk) => (g.log || []).filter(l => l.d && mkey(l.d) === mk).reduce((a, l) => a + l.amt, 0);
 const goalPlanRemaining = mk => S.goals.filter(g => !g.done).reduce((a, g) => a + Math.max(0, (g.monthly || 0) - goalContribIn(g, mk)), 0);
 const goalPlanTotal = () => S.goals.filter(g => !g.done).reduce((a, g) => a + (g.monthly || 0), 0);
@@ -1302,9 +1303,13 @@ function settingsSheet() {
       <div class="field"><label for="s-pct">Tithing %</label><input id="s-pct" inputmode="decimal" value="${s.tithePct ?? 10}"></div></div>
     <div class="field"><label for="s-fast">Fast offering per month</label><input id="s-fast" inputmode="decimal" value="${m(s.fastOffering)}" placeholder="$50"></div>
     <p class="err" id="s-err"></p>
+    <div class="sortcard" style="margin:4px 0 14px;border-color:var(--over);background:color-mix(in srgb,var(--over) 7%,var(--surface))"><span style="font-size:24px" aria-hidden="true">🔄</span>
+      <div class="main">Start over<div class="muted" style="font-weight:500;font-size:14px">Clear the tracker and begin fresh from today.</div></div>
+      <button class="btn sm danger" type="button" id="s-reset">Start over</button></div>
     <div class="actions"><button class="link" type="button" id="s-out">Sign out</button><span class="spacer"></span><button class="btn ghost" type="button" data-close>Cancel</button><button class="btn gold" type="submit">Save</button></div></form>`, root => {
       root.querySelector("[data-close]").onclick = closeSheet;
       $("#s-out").onclick = () => { closeSheet(); firebase.auth().signOut(); };
+      $("#s-reset").onclick = resetSheet;
       $("#sf").onsubmit = async e => {
         e.preventDefault(); const n = id => { const v = $(id).value.trim(); return v ? parseMoney(v) : 0; };
         const pct = parseFloat($("#s-pct").value);
@@ -1317,6 +1322,63 @@ function settingsSheet() {
         if (await save(() => store.set("meta", "settings", data), "Settings saved")) closeSheet();
       };
     });
+}
+
+/* ---------- start over ---------- */
+function downloadBackup() {
+  const data = { saved: new Date().toISOString(), settings: S.settings, cats: S.cats, txns: S.txns, bills: S.bills, goals: S.goals, accts: S.accts };
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: "application/json" }));
+  a.download = `fa-budget-backup-${todayStr()}.json`;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+async function batchRun(ops) {
+  for (let i = 0; i < ops.length; i += 400) { const b = store.db.batch(); ops.slice(i, i + 400).forEach(f => f(b)); await b.commit(); }
+}
+function resetSheet() {
+  let mode = "money";
+  const draw = () => {
+    const sh = $(".sheet"); if (!sh) return;
+    sh.innerHTML = `<div class="step-h">Start over from today</div>
+      <p class="pad-sub" style="margin-bottom:14px">This changes the tracker for both of you. Pick what to clear:</p>
+      <div class="stack" style="gap:10px">
+        <button class="bigcat" type="button" data-mode="money" style="min-height:0;padding:14px;align-items:flex-start;text-align:left;${mode === "money" ? "border:2px solid var(--ink)" : ""}">
+          <span>🧹 Clear money in &amp; out</span><span class="muted" style="font-weight:500;font-size:14px">Erases every purchase, paycheck and bill payment. Keeps your categories, bills, goals, accounts and settings.</span></button>
+        <button class="bigcat" type="button" data-mode="all" style="min-height:0;padding:14px;align-items:flex-start;text-align:left;${mode === "all" ? "border:2px solid var(--over)" : ""}">
+          <span>🗑️ Erase everything</span><span class="muted" style="font-weight:500;font-size:14px">Erases all of the above plus bills, goals, accounts and settings. Categories go back to the starter list.</span></button>
+      </div>
+      <button class="btn ghost wide" type="button" id="rs-backup">⬇️ Download a backup first</button>
+      <div class="field" style="margin-top:14px"><label for="rs-type">Type RESET to confirm</label><input id="rs-type" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="RESET"></div>
+      <p class="err" id="rs-err"></p>
+      <button class="btn wide" type="button" id="rs-go" disabled style="background:var(--over);color:#fff">${mode === "all" ? "Erase everything" : "Clear money in & out"}</button>
+      <button class="btn ghost wide" type="button" data-close>Cancel</button>`;
+    sh.querySelector("[data-close]").onclick = closeSheet;
+    sh.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => { mode = b.dataset.mode; draw(); });
+    $("#rs-backup").onclick = downloadBackup;
+    const typed = $("#rs-type"), go = $("#rs-go");
+    typed.oninput = () => { go.disabled = typed.value.trim().toUpperCase() !== "RESET"; };
+    go.onclick = async () => {
+      go.disabled = true; go.textContent = "Working…";
+      const db = store.db, ops = [];
+      S.txns.forEach(t => ops.push(b => b.delete(db.collection("txns").doc(t.id))));
+      S.fun.forEach(f => ops.push(b => b.delete(db.collection(privPath()).doc(f.id))));
+      if (mode === "all") {
+        ["bills", "goals", "accts", "cats"].forEach(c => S[c].forEach(x => ops.push(b => b.delete(db.collection(c).doc(x.id)))));
+        ops.push(b => b.set(db.collection("meta").doc("settings"), { mode: "category", expectedIncome: 0, allowance: 0, bigPurchase: 0, tithing: true, tithePct: 10, startedOn: todayStr() }));
+      } else {
+        S.bills.forEach(x => ops.push(b => b.update(db.collection("bills").doc(x.id), { paid: {}, dueOn: {} })));
+        ops.push(b => b.set(db.collection("meta").doc("settings"), { startedOn: todayStr() }, { merge: true }));
+      }
+      try {
+        await batchRun(ops);
+        if (mode === "all") await seedIfEmpty(true);
+        closeSheet(); S.tab = "home"; render(); toast("✓ Fresh start. Everything begins today.");
+      } catch (e) {
+        $("#rs-err").textContent = "That didn't finish. Check your internet and try again."; go.disabled = false; go.textContent = "Try again";
+      }
+    };
+  };
+  openSheet("", null, null); draw();
 }
 
 /* ---------- events ---------- */
@@ -1464,9 +1526,8 @@ function drawGateJar() {
 })();
 
 /* first sign-in on a brand-new database: add the starter categories */
-async function seedIfEmpty() {
-  const snap = await store.db.collection("cats").limit(1).get();
-  if (!snap.empty) return;
+async function seedIfEmpty(force) {
+  if (!force) { const snap = await store.db.collection("cats").limit(1).get(); if (!snap.empty) return; }
   const cats = [
     ["tithing", "Tithing", "fixed", 0, false], ["fastoffering", "Fast offerings", "fixed", .5, false],
     ["mortgage", "Mortgage / Rent", "fixed", 1, false], ["utilities", "Utilities", "fixed", 2, false], ["phone", "Phone & Internet", "fixed", 3, false],
